@@ -1,6 +1,6 @@
 import path from 'path';
 import fs from 'fs/promises';
-import { spawn, execFile } from 'child_process';
+import { execFile } from 'child_process';
 import https from 'https';
 import { createWriteStream } from 'fs';
 import AdmZip from 'adm-zip';
@@ -25,6 +25,7 @@ export class BinaryManager {
   private binaries: Map<string, BinaryInfo> = new Map();
   private binariesPath: string;
   private downloadingIds: Set<string> = new Set();
+  private activeRequests: Map<string, any> = new Map();
 
   constructor(
     private logger: Logger,
@@ -286,10 +287,10 @@ export class BinaryManager {
       const binaryPath = path.join(this.binariesPath, `${binaryId}.exe`);
 
       if (binaryId === 'yt-dlp') {
-        await this.downloadFile(binary.downloadUrl, binaryPath, onProgress);
+        await this.downloadFile(binaryId, binary.downloadUrl, binaryPath, onProgress);
       } else {
         const zipPath = path.join(this.binariesPath, `${binaryId}.zip`);
-        await this.downloadFile(binary.downloadUrl, zipPath, onProgress);
+        await this.downloadFile(binaryId, binary.downloadUrl, zipPath, onProgress);
 
         this.logger.info('Binarios', `Extrayendo ${binaryId}...`);
         await this.extractExeFromZip(zipPath, binaryPath, binaryId);
@@ -330,6 +331,7 @@ export class BinaryManager {
   }
 
   private downloadFile(
+    binaryId: string,
     url: string, 
     targetPath: string, 
     onProgress?: (progress: { percent: number; speed: number; downloaded: number; total: number }) => void
@@ -346,6 +348,7 @@ export class BinaryManager {
         if (!resolved) {
           resolved = true;
           file.close();
+          this.activeRequests.delete(binaryId);
           if (err) {
             fs.unlink(targetPath).catch(() => {});
             reject(err);
@@ -356,11 +359,14 @@ export class BinaryManager {
       };
 
       const request = https.get(url, { timeout: 300000 }, (response) => {
+        // Guardar request para poder cancelarlo
+        this.activeRequests.set(binaryId, request);
+
         if (response.statusCode === 301 || response.statusCode === 302) {
           if (response.headers.location) {
             file.close();
             fs.unlink(targetPath).catch(() => {});
-            this.downloadFile(response.headers.location, targetPath, onProgress)
+            this.downloadFile(binaryId, response.headers.location, targetPath, onProgress)
               .then(resolve)
               .catch(reject);
             return;
@@ -449,6 +455,36 @@ export class BinaryManager {
     }
   }
 
+  cancelDownload(binaryId: string): boolean {
+    if (this.downloadingIds.has(binaryId)) {
+      // Cancelar request HTTP si existe
+      const request = this.activeRequests.get(binaryId);
+      if (request) {
+        request.destroy();
+        this.activeRequests.delete(binaryId);
+      }
+
+      // Eliminar archivo parcial
+      const binaryPath = path.join(this.binariesPath, `${binaryId}.exe`);
+      const zipPath = path.join(this.binariesPath, `${binaryId}.zip`);
+      fs.unlink(binaryPath).catch(() => {});
+      fs.unlink(zipPath).catch(() => {});
+
+      // Resetear estado del binario
+      const binary = this.binaries.get(binaryId);
+      if (binary) {
+        binary.path = '';
+        binary.status = 'missing';
+        binary.error = 'Descarga cancelada por el usuario';
+      }
+
+      this.downloadingIds.delete(binaryId);
+      this.logger.info('Binarios', `Descarga de ${binaryId} cancelada`);
+      return true;
+    }
+    return false;
+  }
+
   async repairBinary(binaryId: string): Promise<boolean> {
     const binary = this.binaries.get(binaryId);
     if (!binary) return false;
@@ -529,6 +565,7 @@ export class BinaryManager {
 
   async deleteAllBinaries(): Promise<boolean> {
     try {
+      // Cancelar todas las descargas activas primero
       this.downloadingIds.clear();
 
       for (const [id, binary] of this.binaries) {

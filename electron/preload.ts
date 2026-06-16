@@ -11,6 +11,7 @@ export interface ElectronAPI {
   installBinary: (binaryId: string, data: Uint8Array) => Promise<{ success: boolean; version: string }>;
   deleteAllBinaries: () => Promise<boolean>;
   isDownloading: (binaryId: string) => Promise<boolean>;
+  cancelDownload: (binaryId: string) => Promise<boolean>;
   onDownloadProgress: (callback: (data: { binaryId: string; percent: number; speed: number; downloaded: number; total: number }) => void) => () => void;
 
   // Plugins
@@ -51,6 +52,7 @@ const api: ElectronAPI = {
   installBinary: (binaryId: string, data: Uint8Array) => ipcRenderer.invoke('install-binary', binaryId, data),
   deleteAllBinaries: () => ipcRenderer.invoke('delete-all-binaries'),
   isDownloading: (binaryId: string) => ipcRenderer.invoke('is-downloading', binaryId),
+  cancelDownload: (binaryId: string) => ipcRenderer.invoke('cancel-download', binaryId),
   onDownloadProgress: (callback: (data: { binaryId: string; percent: number; speed: number; downloaded: number; total: number }) => void) => {
     const handler = (_: unknown, data: any) => callback(data);
     ipcRenderer.on('download-progress', handler);

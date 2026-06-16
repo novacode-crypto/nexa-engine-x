@@ -8,6 +8,7 @@ const api = {
   installBinary: (binaryId, data) => electron.ipcRenderer.invoke("install-binary", binaryId, data),
   deleteAllBinaries: () => electron.ipcRenderer.invoke("delete-all-binaries"),
   isDownloading: (binaryId) => electron.ipcRenderer.invoke("is-downloading", binaryId),
+  cancelDownload: (binaryId) => electron.ipcRenderer.invoke("cancel-download", binaryId),
   onDownloadProgress: (callback) => {
     const handler = (_, data) => callback(data);
     electron.ipcRenderer.on("download-progress", handler);

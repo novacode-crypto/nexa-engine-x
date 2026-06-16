@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, Check, AlertTriangle } from 'lucide-react';
+import { Upload, Check, AlertTriangle, Loader2 } from 'lucide-react';
 
 interface BinaryDropzoneProps {
   onFileDrop: (file: File, binaryId: string) => Promise<void>;
@@ -11,6 +11,7 @@ export function BinaryDropzone({ onFileDrop, expectedFiles }: BinaryDropzoneProp
   const [isDragOver, setIsDragOver] = useState(false);
   const [dropError, setDropError] = useState<string | null>(null);
   const [dropSuccess, setDropSuccess] = useState<string | null>(null);
+  const [isInstalling, setIsInstalling] = useState(false);
 
   const validateFile = (file: File): string | null => {
     const fileName = file.name.toLowerCase();
@@ -54,6 +55,7 @@ export function BinaryDropzone({ onFileDrop, expectedFiles }: BinaryDropzoneProp
       return;
     }
 
+    setIsInstalling(true);
     try {
       await onFileDrop(file, binaryId);
       setDropSuccess(file.name + ' instalado correctamente');
@@ -61,6 +63,8 @@ export function BinaryDropzone({ onFileDrop, expectedFiles }: BinaryDropzoneProp
     } catch (err) {
       setDropError('Error al instalar: ' + (err as Error).message);
       setTimeout(() => setDropError(null), 4000);
+    } finally {
+      setIsInstalling(false);
     }
   }, [onFileDrop, expectedFiles]);
 
@@ -97,20 +101,26 @@ export function BinaryDropzone({ onFileDrop, expectedFiles }: BinaryDropzoneProp
         onDrop={handleDrop}
         className={`
           border-2 border-dashed rounded-xl p-6 text-center transition-all duration-300 cursor-pointer
-          ${isDragOver 
-            ? 'border-[#a855f7] bg-[#a855f7]/10 shadow-[0_0_20px_rgba(168,85,247,0.15)]' 
-            : 'border-[#2d2d6b] bg-[#0f0f2e]/50 hover:border-[#a855f7]/50 hover:bg-[#a855f7]/5'
+          ${isDragOver
+            ? 'border-[#a855f7] bg-[#a855f7]/10 shadow-[0_0_20px_rgba(168,85,247,0.15)]'
+            : isInstalling
+              ? 'border-[#fbbf24] bg-[#fbbf24]/10'
+              : 'border-[#2d2d6b] bg-[#0f0f2e]/50 hover:border-[#a855f7]/50 hover:bg-[#a855f7]/5'
           }
         `}
       >
-        <motion.div
+                <motion.div
           animate={isDragOver ? { scale: 1.1 } : { scale: 1 }}
           transition={{ duration: 0.2 }}
         >
-          <Upload className={`w-8 h-8 mx-auto mb-2 ${isDragOver ? 'text-[#a855f7]' : 'text-[#64748b]'}`} />
+          {isInstalling ? (
+            <Loader2 className="w-8 h-8 mx-auto mb-2 text-[#fbbf24] animate-spin" />
+          ) : (
+            <Upload className={`w-8 h-8 mx-auto mb-2 ${isDragOver ? 'text-[#a855f7]' : 'text-[#64748b]'}`} />
+          )}
         </motion.div>
-        <p className={`text-sm font-medium ${isDragOver ? 'text-[#a855f7]' : 'text-[#64748b]'}`}>
-          {isDragOver ? 'Suelta el archivo aqui' : 'Arrastra un binario aqui'}
+        <p className={`text-sm font-medium ${isDragOver ? 'text-[#a855f7]' : isInstalling ? 'text-[#fbbf24]' : 'text-[#64748b]'}`}>
+          {isDragOver ? 'Suelta el archivo aqui' : isInstalling ? 'Instalando...' : 'Arrastra un binario aqui'}
         </p>
         <p className="text-[10px] text-[#64748b]/60 mt-1">
           yt-dlp.exe, ffmpeg.exe, aria2c.exe, o modelos .gguf

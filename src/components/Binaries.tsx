@@ -1,15 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-// import { motion } from "framer-motion";  // temporalmente quitado
+import { useState, useEffect } from "react";
 import {
   AlertCircle,
   CheckCircle2,
   Download,
   FileCode,
-  FolderOpen,
   Loader2,
   RefreshCw,
+  X,
 } from "lucide-react";
-import { useState } from "react";
 import type { BinaryStatus } from "../types";
 import { BinaryDangerZone } from "./BinaryDangerZone";
 import { BinaryDropzone } from "./BinaryDropzone";
@@ -18,6 +17,35 @@ export default function Binaries() {
   const queryClient = useQueryClient();
   const [verifyingIds, setVerifyingIds] = useState<Set<string>>(new Set());
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<Record<string, { percent: number; speed: number; downloaded: number; total: number }>>({});
+
+  // Escuchar progreso de descarga
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.onDownloadProgress((data) => {
+      setDownloadProgress(prev => ({
+        ...prev,
+        [data.binaryId]: {
+          percent: data.percent,
+          speed: data.speed,
+          downloaded: data.downloaded,
+          total: data.total
+        }
+      }));
+
+      // Limpiar cuando llega a 100%
+      if (data.percent >= 100) {
+        setTimeout(() => {
+          setDownloadProgress(prev => {
+            const next = { ...prev };
+            delete next[data.binaryId];
+            return next;
+          });
+        }, 2000);
+      }
+    });
+
+    return unsubscribe;
+  }, []);
 
   const handleFileDrop = async (file: File, binaryId: string) => {
     try {
@@ -41,14 +69,17 @@ export default function Binaries() {
     refetchInterval: 3000,
   });
 
-  // Consultar qué binarios están descargando
   const { data: downloadingMap } = useQuery<Record<string, boolean>>({
     queryKey: ["downloading"],
     queryFn: async () => {
       const ids = ['yt-dlp', 'ffmpeg', 'aria2c'];
       const result: Record<string, boolean> = {};
       for (const id of ids) {
-        result[id] = await window.electronAPI.isDownloading(id);
+        try {
+          result[id] = await window.electronAPI.isDownloading(id);
+        } catch {
+          result[id] = false;
+        }
       }
       return result;
     },
@@ -66,13 +97,28 @@ export default function Binaries() {
       await window.electronAPI.verifyBinary(id);
       queryClient.invalidateQueries({ queryKey: ["binaries"] });
     } finally {
-      // Delay artificial de 2 segundos para poder ver la animación
-      await new Promise(resolve => setTimeout(resolve, 2000));
       setVerifyingIds((prev) => {
         const next = new Set(prev);
         next.delete(id);
         return next;
       });
+    }
+  };
+
+  const handleCancelDownload = async (binaryId: string) => {
+    try {
+      await window.electronAPI.cancelDownload(binaryId);
+      // Forzar refresco inmediato del estado
+      await queryClient.invalidateQueries({ queryKey: ["binaries"] });
+      await queryClient.invalidateQueries({ queryKey: ["downloading"] });
+      // Limpiar progreso
+      setDownloadProgress(prev => {
+        const next = { ...prev };
+        delete next[binaryId];
+        return next;
+      });
+    } catch (err) {
+      console.error('Error cancelando descarga:', err);
     }
   };
 
@@ -181,8 +227,9 @@ export default function Binaries() {
             const StatusIcon = config.icon;
             const isVerifying = verifyingIds.has(binary.id);
             const isDownloading = downloadingMap?.[binary.id] || false;
+            const progress = downloadProgress[binary.id];
             const isProcessing =
-              binary.status === "downloading" || binary.status === "verifying" || isDownloading;
+              binary.status === "downloading" || binary.status === "verifying" || isVerifying || isDownloading;
 
             return (
               <div
@@ -215,13 +262,15 @@ export default function Binaries() {
                     </div>
                   </div>
                   <div
-                    className={`flex items-center gap-1.5 px-2 py-1 rounded-full ${isVerifying ? "bg-[#fbbf24]/10 border-[#fbbf24]/30" : `${config.bg} border ${config.border}`}`}
+                    className={`flex items-center gap-1.5 px-2 py-1 rounded-full ${config.bg} border ${config.border}`}
                   >
                     <StatusIcon
-                      className={`w-3 h-3 ${isVerifying ? "text-[#fbbf24] animate-spin" : `${config.color} ${isProcessing ? "animate-spin" : ""}`}`}
+                      className={`w-3 h-3 ${config.color} ${
+                        isProcessing ? "animate-spin" : ""
+                      }`}
                     />
                     <span
-                      className={`text-[9px] font-medium ${isVerifying ? "text-[#fbbf24]" : config.color}`}
+                      className={`text-[9px] font-medium ${config.color}`}
                       style={{ fontFamily: "JetBrains Mono, monospace" }}
                     >
                       {isVerifying ? "Verificando..." : config.label}
@@ -269,6 +318,37 @@ export default function Binaries() {
                   </div>
                 </div>
 
+                {/* Barra de progreso de descarga */}
+                {progress && (
+                  <div className="mb-3 w-full">
+                    <div className="flex justify-between text-[9px] text-[#64748b] mb-0.5" style={{ fontFamily: "JetBrains Mono, monospace" }}>
+                      <span>{progress.percent}%</span>
+                      <span>{((progress.speed * 8) / 1024 / 1024).toFixed(1)} Mb/s</span>
+                    </div>
+                    <div className="w-full h-1 bg-[#2d2d6b]/40 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-[#a855f7] rounded-full transition-all duration-300"
+                        style={{ width: `${progress.percent}%` }}
+                      />
+                    </div>
+                    <div className="flex justify-between text-[8px] text-[#64748b]/60 mt-0.5" style={{ fontFamily: "JetBrains Mono, monospace" }}>
+                      <span>{(progress.downloaded / 1024 / 1024).toFixed(1)} MB</span>
+                      <span>{(progress.total / 1024 / 1024).toFixed(1)} MB</span>
+                    </div>
+                    {/* Botón cancelar descarga */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleCancelDownload(binary.id);
+                      }}
+                      className="mt-2 flex items-center justify-center gap-1.5 w-full py-1.5 rounded-lg bg-[#f87171]/10 text-[#f87171] text-[10px] font-medium hover:bg-[#f87171]/20 transition-colors"
+                    >
+                      <X className="w-3 h-3" />
+                      Cancelar descarga
+                    </button>
+                  </div>
+                )}
+
                 {/* Botones expandibles hacia abajo */}
                 <div
                   className="overflow-hidden transition-all duration-300 ease-out"
@@ -279,7 +359,7 @@ export default function Binaries() {
                   }}
                 >
                   <div className="pt-3 border-t border-[#2d2d6b]/40 space-y-2">
-                  <button
+                    <button
                       onClick={(e) => {
                         e.stopPropagation();
                         handleVerify(binary.id);
@@ -311,19 +391,6 @@ export default function Binaries() {
                       </button>
                     )}
 
-                    {binary.status === "ready" && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          window.electronAPI.openDownloadsFolder();
-                        }}
-                        className="btn btn-secondary w-full"
-                      >
-                        <FolderOpen className="w-4 h-4" />
-                        Abrir carpeta
-                      </button>
-                    )}
-
                     {binary.error && (
                       <div className="alert alert-error text-[10px]">
                         <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
@@ -338,15 +405,15 @@ export default function Binaries() {
         </div>
       </div>
 
-{/* Danger Zone al fondo */}
-<div className="mt-6 shrink-0">
+      {/* Danger Zone al fondo */}
+      <div className="mt-6 shrink-0">
         <BinaryDangerZone
           onDeleteAll={async () => {
             await window.electronAPI.deleteAllBinaries();
             queryClient.invalidateQueries({ queryKey: ["binaries"] });
             queryClient.invalidateQueries({ queryKey: ["downloading"] });
           }}
-          disabled={Object.values(downloadingMap || {}).some(Boolean)}
+          disabled={Object.values(downloadingMap || {}).some(v => v === true)}
         />
       </div>
     </div>

@@ -237,6 +237,10 @@ class NexaEngineX {
       return this.binaryManager.isDownloading(binaryId);
     });
 
+    ipcMain.handle("cancel-download", async (_, binaryId: string) => {
+      return this.binaryManager.cancelDownload(binaryId);
+    });
+
     // Plugins
     ipcMain.handle("install-plugin", async (_, pluginPath: string) => {
       return this.pluginSystem.installPlugin(pluginPath);

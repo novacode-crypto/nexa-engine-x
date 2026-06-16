@@ -277,6 +277,7 @@ class BinaryManager {
   binaries = /* @__PURE__ */ new Map();
   binariesPath;
   downloadingIds = /* @__PURE__ */ new Set();
+  activeRequests = /* @__PURE__ */ new Map();
   initializeBinaries() {
     const defaultBinaries = [
       {
@@ -499,10 +500,10 @@ class BinaryManager {
       this.logger.info("Binarios", `Descargando ${binaryId}...`);
       const binaryPath = path.join(this.binariesPath, `${binaryId}.exe`);
       if (binaryId === "yt-dlp") {
-        await this.downloadFile(binary.downloadUrl, binaryPath, onProgress);
+        await this.downloadFile(binaryId, binary.downloadUrl, binaryPath, onProgress);
       } else {
         const zipPath = path.join(this.binariesPath, `${binaryId}.zip`);
-        await this.downloadFile(binary.downloadUrl, zipPath, onProgress);
+        await this.downloadFile(binaryId, binary.downloadUrl, zipPath, onProgress);
         this.logger.info("Binarios", `Extrayendo ${binaryId}...`);
         await this.extractExeFromZip(zipPath, binaryPath, binaryId);
         await fs.unlink(zipPath).catch(() => {
@@ -534,7 +535,7 @@ class BinaryManager {
       return false;
     }
   }
-  downloadFile(url2, targetPath, onProgress) {
+  downloadFile(binaryId, url2, targetPath, onProgress) {
     return new Promise((resolve, reject) => {
       const file = fs$1.createWriteStream(targetPath);
       let resolved = false;
@@ -546,6 +547,7 @@ class BinaryManager {
         if (!resolved) {
           resolved = true;
           file.close();
+          this.activeRequests.delete(binaryId);
           if (err) {
             fs.unlink(targetPath).catch(() => {
             });
@@ -556,12 +558,13 @@ class BinaryManager {
         }
       };
       const request = https.get(url2, { timeout: 3e5 }, (response) => {
+        this.activeRequests.set(binaryId, request);
         if (response.statusCode === 301 || response.statusCode === 302) {
           if (response.headers.location) {
             file.close();
             fs.unlink(targetPath).catch(() => {
             });
-            this.downloadFile(response.headers.location, targetPath, onProgress).then(resolve).catch(reject);
+            this.downloadFile(binaryId, response.headers.location, targetPath, onProgress).then(resolve).catch(reject);
             return;
           }
         }
@@ -630,6 +633,31 @@ class BinaryManager {
       this.logger.error("Binarios", `Error extrayendo ${binaryId}: ${error.message}`);
       throw error;
     }
+  }
+  cancelDownload(binaryId) {
+    if (this.downloadingIds.has(binaryId)) {
+      const request = this.activeRequests.get(binaryId);
+      if (request) {
+        request.destroy();
+        this.activeRequests.delete(binaryId);
+      }
+      const binaryPath = path.join(this.binariesPath, `${binaryId}.exe`);
+      const zipPath = path.join(this.binariesPath, `${binaryId}.zip`);
+      fs.unlink(binaryPath).catch(() => {
+      });
+      fs.unlink(zipPath).catch(() => {
+      });
+      const binary = this.binaries.get(binaryId);
+      if (binary) {
+        binary.path = "";
+        binary.status = "missing";
+        binary.error = "Descarga cancelada por el usuario";
+      }
+      this.downloadingIds.delete(binaryId);
+      this.logger.info("Binarios", `Descarga de ${binaryId} cancelada`);
+      return true;
+    }
+    return false;
   }
   async repairBinary(binaryId) {
     const binary = this.binaries.get(binaryId);
@@ -1258,6 +1286,9 @@ class NexaEngineX {
     });
     electron.ipcMain.handle("is-downloading", async (_, binaryId) => {
       return this.binaryManager.isDownloading(binaryId);
+    });
+    electron.ipcMain.handle("cancel-download", async (_, binaryId) => {
+      return this.binaryManager.cancelDownload(binaryId);
     });
     electron.ipcMain.handle("install-plugin", async (_, pluginPath) => {
       return this.pluginSystem.installPlugin(pluginPath);
