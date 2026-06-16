@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { motion } from "framer-motion";
+// import { motion } from "framer-motion";  // temporalmente quitado
 import {
   AlertCircle,
   CheckCircle2,
@@ -41,6 +41,20 @@ export default function Binaries() {
     refetchInterval: 3000,
   });
 
+  // Consultar qué binarios están descargando
+  const { data: downloadingMap } = useQuery<Record<string, boolean>>({
+    queryKey: ["downloading"],
+    queryFn: async () => {
+      const ids = ['yt-dlp', 'ffmpeg', 'aria2c'];
+      const result: Record<string, boolean> = {};
+      for (const id of ids) {
+        result[id] = await window.electronAPI.isDownloading(id);
+      }
+      return result;
+    },
+    refetchInterval: 1000,
+  });
+
   const downloadMutation = useMutation({
     mutationFn: (id: string) => window.electronAPI.downloadBinary(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["binaries"] }),
@@ -52,6 +66,8 @@ export default function Binaries() {
       await window.electronAPI.verifyBinary(id);
       queryClient.invalidateQueries({ queryKey: ["binaries"] });
     } finally {
+      // Delay artificial de 2 segundos para poder ver la animación
+      await new Promise(resolve => setTimeout(resolve, 2000));
       setVerifyingIds((prev) => {
         const next = new Set(prev);
         next.delete(id);
@@ -159,20 +175,18 @@ export default function Binaries() {
           />
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-start">
           {binaries?.map((binary) => {
             const config = getStatusConfig(binary.status);
             const StatusIcon = config.icon;
             const isVerifying = verifyingIds.has(binary.id);
+            const isDownloading = downloadingMap?.[binary.id] || false;
             const isProcessing =
-              binary.status === "downloading" || binary.status === "verifying";
+              binary.status === "downloading" || binary.status === "verifying" || isDownloading;
 
             return (
-              <motion.div
-                  key={binary.id}
-                  initial={{ opacity: 0, scale: 0.95 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  transition={{ duration: 0.2 }}
+              <div
+                key={binary.id}
                 className={`glass-panel p-4 cursor-pointer transition-all duration-300 border overflow-hidden relative ${
                   hoveredId === binary.id
                     ? "border-[#a855f7]/40 shadow-[0_8px_32px_rgba(168,85,247,0.12)]"
@@ -201,18 +215,16 @@ export default function Binaries() {
                     </div>
                   </div>
                   <div
-                    className={`flex items-center gap-1.5 px-2 py-1 rounded-full ${config.bg} border ${config.border}`}
+                    className={`flex items-center gap-1.5 px-2 py-1 rounded-full ${isVerifying ? "bg-[#fbbf24]/10 border-[#fbbf24]/30" : `${config.bg} border ${config.border}`}`}
                   >
                     <StatusIcon
-                      className={`w-3 h-3 ${config.color} ${
-                        isProcessing ? "animate-spin" : ""
-                      }`}
+                      className={`w-3 h-3 ${isVerifying ? "text-[#fbbf24] animate-spin" : `${config.color} ${isProcessing ? "animate-spin" : ""}`}`}
                     />
                     <span
-                      className={`text-[9px] font-medium ${config.color}`}
+                      className={`text-[9px] font-medium ${isVerifying ? "text-[#fbbf24]" : config.color}`}
                       style={{ fontFamily: "JetBrains Mono, monospace" }}
                     >
-                      {config.label}
+                      {isVerifying ? "Verificando..." : config.label}
                     </span>
                   </div>
                 </div>
@@ -259,19 +271,20 @@ export default function Binaries() {
 
                 {/* Botones expandibles hacia abajo */}
                 <div
-                  className={`transition-all duration-300 ease-out overflow-hidden ${
-                    hoveredId === binary.id
-                      ? "max-h-[200px] opacity-100 mt-2"
-                      : "max-h-0 opacity-0 mt-0"
-                  }`}
+                  className="overflow-hidden transition-all duration-300 ease-out"
+                  style={{
+                    maxHeight: hoveredId === binary.id ? "200px" : "0px",
+                    opacity: hoveredId === binary.id ? 1 : 0,
+                    marginTop: hoveredId === binary.id ? "8px" : "0px",
+                  }}
                 >
                   <div className="pt-3 border-t border-[#2d2d6b]/40 space-y-2">
-                    <button
+                  <button
                       onClick={(e) => {
                         e.stopPropagation();
                         handleVerify(binary.id);
                       }}
-                      disabled={isVerifying}
+                      disabled={isVerifying || isDownloading}
                       className="btn btn-secondary w-full"
                     >
                       <RefreshCw
@@ -319,19 +332,21 @@ export default function Binaries() {
                     )}
                   </div>
                 </div>
-              </motion.div>
+              </div>
             );
           })}
         </div>
       </div>
 
-      {/* Danger Zone al fondo */}
-      <div className="mt-6 shrink-0">
+{/* Danger Zone al fondo */}
+<div className="mt-6 shrink-0">
         <BinaryDangerZone
           onDeleteAll={async () => {
             await window.electronAPI.deleteAllBinaries();
             queryClient.invalidateQueries({ queryKey: ["binaries"] });
+            queryClient.invalidateQueries({ queryKey: ["downloading"] });
           }}
+          disabled={Object.values(downloadingMap || {}).some(Boolean)}
         />
       </div>
     </div>

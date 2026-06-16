@@ -204,10 +204,19 @@ class NexaEngineX {
     });
 
     // Binarios
-    ipcMain.handle("download-binary", async (_, binaryId: string) => {
-      return this.binaryManager.downloadBinary(binaryId);
-    });
 
+    ipcMain.handle("download-binary", async (_, binaryId: string) => {
+      return this.binaryManager.downloadBinary(binaryId, (progress) => {
+        this.mainWindow?.webContents.send('download-progress', {
+          binaryId,
+          percent: progress.percent,
+          speed: progress.speed,
+          downloaded: progress.downloaded,
+          total: progress.total
+        });
+      });
+    });
+   
     ipcMain.handle("verify-binary", async (_, binaryId: string) => {
       return this.binaryManager.verifyBinary(binaryId);
     });
@@ -222,6 +231,10 @@ class NexaEngineX {
 
     ipcMain.handle("delete-all-binaries", async () => {
       return this.binaryManager.deleteAllBinaries();
+    });
+
+    ipcMain.handle("is-downloading", async (_, binaryId: string) => {
+      return this.binaryManager.isDownloading(binaryId);
     });
 
     // Plugins

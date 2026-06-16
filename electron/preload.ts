@@ -2,40 +2,43 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 export interface ElectronAPI {
   // Dashboard
-  getDashboardData: () => Promise<unknown>;
-  
+  getDashboardData: () => Promise<any>;
+
   // Binarios
-  downloadBinary: (binaryId: string) => Promise<unknown>;
-  verifyBinary: (binaryId: string) => Promise<unknown>;
-  repairBinary: (binaryId: string) => Promise<unknown>;
-  installBinary: (binaryId: string, data: Uint8Array) => Promise<boolean>;
+  downloadBinary: (binaryId: string) => Promise<boolean>;
+  verifyBinary: (binaryId: string) => Promise<boolean>;
+  repairBinary: (binaryId: string) => Promise<boolean>;
+  installBinary: (binaryId: string, data: Uint8Array) => Promise<{ success: boolean; version: string }>;
   deleteAllBinaries: () => Promise<boolean>;
-  
+  isDownloading: (binaryId: string) => Promise<boolean>;
+  onDownloadProgress: (callback: (data: { binaryId: string; percent: number; speed: number; downloaded: number; total: number }) => void) => () => void;
+
   // Plugins
-  installPlugin: (pluginPath: string) => Promise<unknown>;
-  getPlugins: () => Promise<unknown>;
-  
+  installPlugin: (pluginPath: string) => Promise<any>;
+  getPlugins: () => Promise<any[]>;
+
   // Configuración
-  getSettings: () => Promise<Record<string, unknown>>;
-  setSetting: (key: string, value: unknown) => Promise<boolean>;
-  
+  getSettings: () => Promise<Record<string, any>>;
+  setSetting: (key: string, value: unknown) => Promise<void>;
+
   // Logs
-  getLogs: (limit?: number) => Promise<unknown[]>;
-  
+  getLogs: (limit?: number) => Promise<any[]>;
+
   // Diagnóstico
-  runDiagnostics: () => Promise<unknown>;
-  
+  runDiagnostics: () => Promise<any>;
+
   // Sistema
-  restartService: () => Promise<boolean>;
+  restartService: () => Promise<void>;
   regenerateToken: () => Promise<string>;
   openDownloadsFolder: () => Promise<void>;
+  openBinaryFolder: (binaryId: string) => Promise<void>;
   showNotification: (title: string, body: string) => Promise<void>;
 
-    // Controles de ventana
-    windowMinimize: () => Promise<void>;
-    windowMaximize: () => Promise<void>;
-    windowClose: () => Promise<void>;
-  
+  // Controles de ventana
+  windowMinimize: () => Promise<void>;
+  windowMaximize: () => Promise<void>;
+  windowClose: () => Promise<void>;
+
   // Navegación
   onNavigate: (callback: (route: string) => void) => () => void;
 }
@@ -47,6 +50,12 @@ const api: ElectronAPI = {
   repairBinary: (binaryId: string) => ipcRenderer.invoke('repair-binary', binaryId),
   installBinary: (binaryId: string, data: Uint8Array) => ipcRenderer.invoke('install-binary', binaryId, data),
   deleteAllBinaries: () => ipcRenderer.invoke('delete-all-binaries'),
+  isDownloading: (binaryId: string) => ipcRenderer.invoke('is-downloading', binaryId),
+  onDownloadProgress: (callback: (data: { binaryId: string; percent: number; speed: number; downloaded: number; total: number }) => void) => {
+    const handler = (_: unknown, data: any) => callback(data);
+    ipcRenderer.on('download-progress', handler);
+    return () => ipcRenderer.removeListener('download-progress', handler);
+  },
   installPlugin: (pluginPath: string) => ipcRenderer.invoke('install-plugin', pluginPath),
   getPlugins: () => ipcRenderer.invoke('get-plugins'),
   getSettings: () => ipcRenderer.invoke('get-settings'),
@@ -56,15 +65,16 @@ const api: ElectronAPI = {
   restartService: () => ipcRenderer.invoke('restart-service'),
   regenerateToken: () => ipcRenderer.invoke('regenerate-token'),
   openDownloadsFolder: () => ipcRenderer.invoke('open-downloads-folder'),
+  openBinaryFolder: (binaryId: string) => ipcRenderer.invoke('open-binary-folder', binaryId),
   showNotification: (title: string, body: string) => ipcRenderer.invoke('show-notification', title, body),
+  windowMinimize: () => ipcRenderer.invoke('window-minimize'),
+  windowMaximize: () => ipcRenderer.invoke('window-maximize'),
+  windowClose: () => ipcRenderer.invoke('window-close'),
   onNavigate: (callback: (route: string) => void) => {
     const handler = (_: unknown, route: string) => callback(route);
     ipcRenderer.on('navigate-to', handler);
     return () => ipcRenderer.removeListener('navigate-to', handler);
   },
-  windowMinimize: () => ipcRenderer.invoke('window-minimize'),
-  windowMaximize: () => ipcRenderer.invoke('window-maximize'),
-  windowClose: () => ipcRenderer.invoke('window-close'),
 };
 
 contextBridge.exposeInMainWorld('electronAPI', api);

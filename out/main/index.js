@@ -29,6 +29,9 @@ const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const child_process = require("child_process");
 const fs = require("fs/promises");
+const https = require("https");
+const fs$1 = require("fs");
+const AdmZip = require("adm-zip");
 const os = require("os");
 const Store = require("electron-store");
 class ApiServer {
@@ -273,6 +276,7 @@ class BinaryManager {
   }
   binaries = /* @__PURE__ */ new Map();
   binariesPath;
+  downloadingIds = /* @__PURE__ */ new Set();
   initializeBinaries() {
     const defaultBinaries = [
       {
@@ -333,11 +337,14 @@ class BinaryManager {
       const binaryPath = path.join(this.binariesPath, `${id}.exe`);
       try {
         const stats = await fs.stat(binaryPath);
-        if (stats.isFile()) {
+        if (stats.isFile() && stats.size > 1e3) {
           binary.path = binaryPath;
           binary.size = stats.size;
           binary.status = "verifying";
-          this.logger.info("Binarios", `Binario encontrado: ${id}`);
+          this.logger.info("Binarios", `Binario encontrado: ${id} (${stats.size} bytes)`);
+        } else if (stats.size <= 1e3) {
+          await fs.unlink(binaryPath);
+          this.logger.warning("Binarios", `Archivo dummy eliminado: ${id}`);
         }
       } catch {
       }
@@ -345,7 +352,7 @@ class BinaryManager {
   }
   async verifyAllBinaries() {
     for (const [id, binary] of this.binaries) {
-      if (binary.path && binary.status !== "missing") {
+      if (binary.path && binary.status !== "missing" && !this.downloadingIds.has(id)) {
         await this.verifyBinary(id);
       }
     }
@@ -353,6 +360,9 @@ class BinaryManager {
   async verifyBinary(binaryId) {
     const binary = this.binaries.get(binaryId);
     if (!binary) return false;
+    if (this.downloadingIds.has(binaryId)) {
+      return false;
+    }
     if (!binary.path) {
       const binaryNames = {
         "yt-dlp": "yt-dlp.exe",
@@ -368,18 +378,26 @@ class BinaryManager {
       } catch {
         binary.status = "missing";
         binary.error = "Binario no encontrado";
+        binary.version = "";
+        binary.size = 0;
         return false;
       }
     } else {
       binary.status = "verifying";
+      binary.error = void 0;
     }
     try {
-      await fs.access(binary.path);
+      const stats = await fs.stat(binary.path);
+      if (stats.size < 1e3) {
+        binary.status = "corrupt";
+        binary.error = "Archivo demasiado pequeño (posiblemente corrupto)";
+        return false;
+      }
       const version = await this.getBinaryVersion(binaryId, binary.path);
       if (version) {
         binary.version = version;
         binary.status = "ready";
-        binary.size = (await fs.stat(binary.path)).size;
+        binary.size = stats.size;
         binary.lastChecked = (/* @__PURE__ */ new Date()).toISOString();
         binary.error = void 0;
         this.logger.success("Binarios", `${binaryId} verificado correctamente (v${version})`);
@@ -391,13 +409,34 @@ class BinaryManager {
         return false;
       }
     } catch (error) {
-      binary.status = "error";
-      binary.error = error instanceof Error ? error.message : "Error desconocido";
-      this.logger.error("Binarios", `Error verificando ${binaryId}: ${binary.error}`);
+      if (error.code === "ENOENT") {
+        binary.status = "missing";
+        binary.error = "Binario no encontrado (eliminado manualmente)";
+        binary.path = "";
+        binary.version = "";
+        binary.size = 0;
+        this.logger.warning("Binarios", `${binaryId} fue eliminado manualmente`);
+      } else {
+        binary.status = "error";
+        binary.error = error instanceof Error ? error.message : "Error desconocido";
+        this.logger.error("Binarios", `Error verificando ${binaryId}: ${binary.error}`);
+      }
       return false;
     }
   }
   async getBinaryVersion(binaryId, binaryPath) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const version = await this.tryGetBinaryVersion(binaryId, binaryPath);
+      if (version) {
+        return version;
+      }
+      if (attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, 1e3));
+      }
+    }
+    return "";
+  }
+  async tryGetBinaryVersion(binaryId, binaryPath) {
     return new Promise((resolve) => {
       let args = [];
       switch (binaryId) {
@@ -414,40 +453,71 @@ class BinaryManager {
           resolve("");
           return;
       }
-      const child = child_process.spawn(binaryPath, args, {
+      let finished = false;
+      const finish = (version) => {
+        if (!finished) {
+          finished = true;
+          resolve(version);
+        }
+      };
+      child_process.execFile(binaryPath, args, {
         windowsHide: true,
-        shell: false,
-        timeout: 1e4
-      });
-      let output = "";
-      child.stdout.on("data", (data) => {
-        output += data.toString();
-      });
-      child.stderr.on("data", (data) => {
-        output += data.toString();
-      });
-      child.on("close", () => {
+        timeout: 8e3
+      }, (error, stdout, stderr) => {
+        if (error) {
+          this.logger.error("Binarios", `execFile error en ${binaryId}: ${error.message}`);
+          finish("");
+          return;
+        }
+        const output = stdout + stderr;
         const lines = output.trim().split("\n");
         let version = lines[0]?.trim() || "";
         if (binaryId === "ffmpeg" && version.includes("version")) {
           const match = version.match(/version\s+([\d.]+)/);
           version = match ? match[1] : version;
         }
-        resolve(version);
+        if (binaryId === "aria2c") {
+          const match = version.match(/aria2\s+version\s+([\d.]+)/i) || output.match(/aria2\s+version\s+([\d.]+)/i);
+          version = match ? match[1] : "";
+        }
+        finish(version || "");
       });
-      child.on("error", () => resolve(""));
+      setTimeout(() => finish(""), 1e4);
     });
   }
-  async downloadBinary(binaryId) {
+  async downloadBinary(binaryId, onProgress) {
     const binary = this.binaries.get(binaryId);
     if (!binary) return false;
+    if (this.downloadingIds.has(binaryId)) {
+      this.logger.warning("Binarios", `Descarga de ${binaryId} ya en progreso`);
+      return false;
+    }
+    this.downloadingIds.add(binaryId);
     try {
       binary.status = "downloading";
+      binary.error = void 0;
       this.logger.info("Binarios", `Descargando ${binaryId}...`);
       const binaryPath = path.join(this.binariesPath, `${binaryId}.exe`);
-      await fs.writeFile(binaryPath, Buffer.from("dummy-binary-content"));
+      if (binaryId === "yt-dlp") {
+        await this.downloadFile(binary.downloadUrl, binaryPath, onProgress);
+      } else {
+        const zipPath = path.join(this.binariesPath, `${binaryId}.zip`);
+        await this.downloadFile(binary.downloadUrl, zipPath, onProgress);
+        this.logger.info("Binarios", `Extrayendo ${binaryId}...`);
+        await this.extractExeFromZip(zipPath, binaryPath, binaryId);
+        await fs.unlink(zipPath).catch(() => {
+        });
+      }
       binary.path = binaryPath;
       binary.status = "verifying";
+      try {
+        const { execSync } = require("child_process");
+        execSync(`powershell.exe -Command "Unblock-File -Path '${binaryPath}'"`);
+        this.logger.info("Binarios", `Atributo de bloqueo removido de ${binaryId}`);
+      } catch {
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1e3));
+      this.downloadingIds.delete(binaryId);
       const isValid = await this.verifyBinary(binaryId);
       if (isValid) {
         this.logger.success("Binarios", `${binaryId} descargado y verificado`);
@@ -460,7 +530,105 @@ class BinaryManager {
       binary.status = "error";
       binary.error = error instanceof Error ? error.message : "Error de descarga";
       this.logger.error("Binarios", `Error descargando ${binaryId}: ${binary.error}`);
+      this.downloadingIds.delete(binaryId);
       return false;
+    }
+  }
+  downloadFile(url2, targetPath, onProgress) {
+    return new Promise((resolve, reject) => {
+      const file = fs$1.createWriteStream(targetPath);
+      let resolved = false;
+      let downloadedBytes = 0;
+      let totalBytes = 0;
+      let lastReportTime = Date.now();
+      let lastReportBytes = 0;
+      const finish = (err) => {
+        if (!resolved) {
+          resolved = true;
+          file.close();
+          if (err) {
+            fs.unlink(targetPath).catch(() => {
+            });
+            reject(err);
+          } else {
+            resolve();
+          }
+        }
+      };
+      const request = https.get(url2, { timeout: 3e5 }, (response) => {
+        if (response.statusCode === 301 || response.statusCode === 302) {
+          if (response.headers.location) {
+            file.close();
+            fs.unlink(targetPath).catch(() => {
+            });
+            this.downloadFile(response.headers.location, targetPath, onProgress).then(resolve).catch(reject);
+            return;
+          }
+        }
+        if (response.statusCode !== 200) {
+          finish(new Error(`HTTP ${response.statusCode}`));
+          return;
+        }
+        totalBytes = parseInt(response.headers["content-length"] || "0", 10);
+        response.on("data", (chunk) => {
+          downloadedBytes += chunk.length;
+          const now = Date.now();
+          const timeDiff = now - lastReportTime;
+          if (timeDiff > 500 && onProgress && totalBytes > 0) {
+            const bytesDiff = downloadedBytes - lastReportBytes;
+            const speed = bytesDiff / timeDiff * 1e3;
+            onProgress({
+              percent: Math.round(downloadedBytes / totalBytes * 100),
+              speed,
+              downloaded: downloadedBytes,
+              total: totalBytes
+            });
+            lastReportTime = now;
+            lastReportBytes = downloadedBytes;
+          }
+        });
+        response.pipe(file);
+        file.on("finish", () => {
+          if (onProgress && totalBytes > 0) {
+            onProgress({
+              percent: 100,
+              speed: 0,
+              downloaded: downloadedBytes,
+              total: totalBytes
+            });
+          }
+          finish();
+        });
+        file.on("error", (err) => finish(err));
+      });
+      request.on("error", (err) => finish(err));
+      request.on("timeout", () => {
+        request.destroy();
+        finish(new Error("Timeout de descarga (5 minutos)"));
+      });
+    });
+  }
+  async extractExeFromZip(zipPath, targetPath, binaryId) {
+    try {
+      const zip = new AdmZip(zipPath);
+      const entries = zip.getEntries();
+      const exeEntry = entries.find((entry) => {
+        const name = entry.entryName.toLowerCase();
+        return name.endsWith(`${binaryId}.exe`) || name.endsWith(`${binaryId}.exe`.replace("-", ""));
+      }) || entries.find((entry) => entry.entryName.toLowerCase().endsWith(".exe"));
+      if (!exeEntry) {
+        throw new Error(`No se encontró .exe para ${binaryId} en el ZIP`);
+      }
+      zip.extractEntryTo(exeEntry, path.dirname(targetPath), false, true);
+      const extractedPath = path.join(path.dirname(targetPath), exeEntry.entryName.split("/").pop() || "");
+      if (extractedPath !== targetPath) {
+        await fs.rename(extractedPath, targetPath).catch(() => {
+        });
+      }
+      this.logger.success("Binarios", `${binaryId} extraído correctamente`);
+    } catch (error) {
+      this.logger.error("Binarios", `Error extrayendo ${binaryId}: ${error.message}`);
+      throw error;
     }
   }
   async repairBinary(binaryId) {
@@ -473,6 +641,11 @@ class BinaryManager {
       } catch {
       }
     }
+    binary.path = "";
+    binary.version = "";
+    binary.size = 0;
+    binary.status = "missing";
+    binary.error = void 0;
     return this.downloadBinary(binaryId);
   }
   async getBinaryPath(binaryId) {
@@ -487,6 +660,9 @@ class BinaryManager {
   }
   getBinaryStatus(binaryId) {
     return this.binaries.get(binaryId);
+  }
+  isDownloading(binaryId) {
+    return this.downloadingIds.has(binaryId);
   }
   async installBinary(binaryId, data) {
     try {
@@ -508,7 +684,8 @@ class BinaryManager {
       binary.lastChecked = (/* @__PURE__ */ new Date()).toISOString();
       binary.error = void 0;
       this.logger.success("Binarios", `${binaryId} instalado correctamente`);
-      return { success: true, version: "" };
+      await this.verifyBinary(binaryId);
+      return { success: true, version: binary.version };
     } catch (error) {
       this.logger.error("Binarios", `Error instalando ${binaryId}: ${error instanceof Error ? error.message : "Error desconocido"}`);
       return { success: false, version: "" };
@@ -516,6 +693,7 @@ class BinaryManager {
   }
   async deleteAllBinaries() {
     try {
+      this.downloadingIds.clear();
       for (const [id, binary] of this.binaries) {
         if (binary.path && binary.path.length > 0) {
           try {
@@ -1056,7 +1234,15 @@ class NexaEngineX {
       return { pong: true, timestamp: Date.now() };
     });
     electron.ipcMain.handle("download-binary", async (_, binaryId) => {
-      return this.binaryManager.downloadBinary(binaryId);
+      return this.binaryManager.downloadBinary(binaryId, (progress) => {
+        this.mainWindow?.webContents.send("download-progress", {
+          binaryId,
+          percent: progress.percent,
+          speed: progress.speed,
+          downloaded: progress.downloaded,
+          total: progress.total
+        });
+      });
     });
     electron.ipcMain.handle("verify-binary", async (_, binaryId) => {
       return this.binaryManager.verifyBinary(binaryId);
@@ -1069,6 +1255,9 @@ class NexaEngineX {
     });
     electron.ipcMain.handle("delete-all-binaries", async () => {
       return this.binaryManager.deleteAllBinaries();
+    });
+    electron.ipcMain.handle("is-downloading", async (_, binaryId) => {
+      return this.binaryManager.isDownloading(binaryId);
     });
     electron.ipcMain.handle("install-plugin", async (_, pluginPath) => {
       return this.pluginSystem.installPlugin(pluginPath);

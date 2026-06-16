@@ -1,6 +1,9 @@
 import path from 'path';
 import fs from 'fs/promises';
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
+import https from 'https';
+import { createWriteStream } from 'fs';
+import AdmZip from 'adm-zip';
 import { Logger } from './logger';
 import { StoreManager } from './store-manager';
 
@@ -21,6 +24,7 @@ export interface BinaryInfo {
 export class BinaryManager {
   private binaries: Map<string, BinaryInfo> = new Map();
   private binariesPath: string;
+  private downloadingIds: Set<string> = new Set();
 
   constructor(
     private logger: Logger,
@@ -94,11 +98,14 @@ export class BinaryManager {
       const binaryPath = path.join(this.binariesPath, `${id}.exe`);
       try {
         const stats = await fs.stat(binaryPath);
-        if (stats.isFile()) {
+        if (stats.isFile() && stats.size > 1000) {
           binary.path = binaryPath;
           binary.size = stats.size;
           binary.status = 'verifying';
-          this.logger.info('Binarios', `Binario encontrado: ${id}`);
+          this.logger.info('Binarios', `Binario encontrado: ${id} (${stats.size} bytes)`);
+        } else if (stats.size <= 1000) {
+          await fs.unlink(binaryPath);
+          this.logger.warning('Binarios', `Archivo dummy eliminado: ${id}`);
         }
       } catch {
         // Binario no existe
@@ -108,7 +115,7 @@ export class BinaryManager {
 
   async verifyAllBinaries(): Promise<void> {
     for (const [id, binary] of this.binaries) {
-      if (binary.path && binary.status !== 'missing') {
+      if (binary.path && binary.status !== 'missing' && !this.downloadingIds.has(id)) {
         await this.verifyBinary(id);
       }
     }
@@ -118,7 +125,10 @@ export class BinaryManager {
     const binary = this.binaries.get(binaryId);
     if (!binary) return false;
 
-    // Si no hay path, verificar si existe en la carpeta de binarios
+    if (this.downloadingIds.has(binaryId)) {
+      return false;
+    }
+
     if (!binary.path) {
       const binaryNames: Record<string, string> = {
         'yt-dlp': 'yt-dlp.exe',
@@ -127,7 +137,7 @@ export class BinaryManager {
       };
       const fileName = binaryNames[binaryId] || binaryId;
       const expectedPath = path.join(this.binariesPath, fileName);
-      
+
       try {
         await fs.access(expectedPath);
         binary.path = expectedPath;
@@ -135,23 +145,29 @@ export class BinaryManager {
       } catch {
         binary.status = 'missing';
         binary.error = 'Binario no encontrado';
+        binary.version = '';
+        binary.size = 0;
         return false;
       }
     } else {
       binary.status = 'verifying';
+      binary.error = undefined;
     }
 
     try {
-      // Verificar que el archivo existe
-      await fs.access(binary.path);
+      const stats = await fs.stat(binary.path);
+      if (stats.size < 1000) {
+        binary.status = 'corrupt';
+        binary.error = 'Archivo demasiado pequeño (posiblemente corrupto)';
+        return false;
+      }
 
-      // Obtener versión
       const version = await this.getBinaryVersion(binaryId, binary.path);
 
       if (version) {
         binary.version = version;
         binary.status = 'ready';
-        binary.size = (await fs.stat(binary.path)).size;
+        binary.size = stats.size;
         binary.lastChecked = new Date().toISOString();
         binary.error = undefined;
         this.logger.success('Binarios', `${binaryId} verificado correctamente (v${version})`);
@@ -162,18 +178,40 @@ export class BinaryManager {
         this.logger.warning('Binarios', `${binaryId} parece estar corrupto`);
         return false;
       }
-    } catch (error) {
-      binary.status = 'error';
-      binary.error = error instanceof Error ? error.message : 'Error desconocido';
-      this.logger.error('Binarios', `Error verificando ${binaryId}: ${binary.error}`);
+    } catch (error: any) {
+      if (error.code === 'ENOENT') {
+        binary.status = 'missing';
+        binary.error = 'Binario no encontrado (eliminado manualmente)';
+        binary.path = '';
+        binary.version = '';
+        binary.size = 0;
+        this.logger.warning('Binarios', `${binaryId} fue eliminado manualmente`);
+      } else {
+        binary.status = 'error';
+        binary.error = error instanceof Error ? error.message : 'Error desconocido';
+        this.logger.error('Binarios', `Error verificando ${binaryId}: ${binary.error}`);
+      }
       return false;
     }
   }
 
   private async getBinaryVersion(binaryId: string, binaryPath: string): Promise<string> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const version = await this.tryGetBinaryVersion(binaryId, binaryPath);
+      if (version) {
+        return version;
+      }
+      if (attempt < 3) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    return '';
+  }
+
+  private async tryGetBinaryVersion(binaryId: string, binaryPath: string): Promise<string> {
     return new Promise((resolve) => {
       let args: string[] = [];
-      
+
       switch (binaryId) {
         case 'yt-dlp':
           args = ['--version'];
@@ -189,53 +227,92 @@ export class BinaryManager {
           return;
       }
 
-      const child = spawn(binaryPath, args, {
+      let finished = false;
+
+      const finish = (version: string) => {
+        if (!finished) {
+          finished = true;
+          resolve(version);
+        }
+      };
+
+      execFile(binaryPath, args, { 
         windowsHide: true,
-        shell: false,
-        timeout: 10000
-      });
+        timeout: 8000 
+      }, (error, stdout, stderr) => {
+        if (error) {
+          this.logger.error('Binarios', `execFile error en ${binaryId}: ${error.message}`);
+          finish('');
+          return;
+        }
 
-      let output = '';
-      child.stdout.on('data', (data: Buffer) => { output += data.toString(); });
-      child.stderr.on('data', (data: Buffer) => { output += data.toString(); });
-
-      child.on('close', () => {
+        const output = stdout + stderr;
         const lines = output.trim().split('\n');
         let version = lines[0]?.trim() || '';
+
         if (binaryId === 'ffmpeg' && version.includes('version')) {
           const match = version.match(/version\s+([\d.]+)/);
           version = match ? match[1] : version;
         }
-        resolve(version);
+
+        if (binaryId === 'aria2c') {
+          const match = version.match(/aria2\s+version\s+([\d.]+)/i) || output.match(/aria2\s+version\s+([\d.]+)/i);
+          version = match ? match[1] : '';
+        }
+
+        finish(version || '');
       });
 
-      child.on('error', () => resolve(''));
+      setTimeout(() => finish(''), 10000);
     });
   }
 
-  async downloadBinary(binaryId: string): Promise<boolean> {
+  async downloadBinary(binaryId: string, onProgress?: (progress: { percent: number; speed: number; downloaded: number; total: number }) => void): Promise<boolean> {
     const binary = this.binaries.get(binaryId);
     if (!binary) return false;
 
+    if (this.downloadingIds.has(binaryId)) {
+      this.logger.warning('Binarios', `Descarga de ${binaryId} ya en progreso`);
+      return false;
+    }
+
+    this.downloadingIds.add(binaryId);
+
     try {
       binary.status = 'downloading';
+      binary.error = undefined;
       this.logger.info('Binarios', `Descargando ${binaryId}...`);
 
-      // Simulación de descarga - en producción usar fetch/axios
-      // const response = await fetch(binary.downloadUrl);
-      // const buffer = await response.arrayBuffer();
-      // await fs.writeFile(binary.path, Buffer.from(buffer));
-
-      // Por ahora, crear archivo dummy para demo
       const binaryPath = path.join(this.binariesPath, `${binaryId}.exe`);
-      await fs.writeFile(binaryPath, Buffer.from('dummy-binary-content'));
-      
+
+      if (binaryId === 'yt-dlp') {
+        await this.downloadFile(binary.downloadUrl, binaryPath, onProgress);
+      } else {
+        const zipPath = path.join(this.binariesPath, `${binaryId}.zip`);
+        await this.downloadFile(binary.downloadUrl, zipPath, onProgress);
+
+        this.logger.info('Binarios', `Extrayendo ${binaryId}...`);
+        await this.extractExeFromZip(zipPath, binaryPath, binaryId);
+
+        await fs.unlink(zipPath).catch(() => {});
+      }
+
       binary.path = binaryPath;
       binary.status = 'verifying';
-      
-      // Verificar después de descargar
+
+      try {
+        const { execSync } = require('child_process');
+        execSync(`powershell.exe -Command "Unblock-File -Path '${binaryPath}'"`);
+        this.logger.info('Binarios', `Atributo de bloqueo removido de ${binaryId}`);
+      } catch {
+        // Ignorar si falla
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      this.downloadingIds.delete(binaryId);
       const isValid = await this.verifyBinary(binaryId);
-      
+
       if (isValid) {
         this.logger.success('Binarios', `${binaryId} descargado y verificado`);
         return true;
@@ -247,7 +324,128 @@ export class BinaryManager {
       binary.status = 'error';
       binary.error = error instanceof Error ? error.message : 'Error de descarga';
       this.logger.error('Binarios', `Error descargando ${binaryId}: ${binary.error}`);
+      this.downloadingIds.delete(binaryId);
       return false;
+    }
+  }
+
+  private downloadFile(
+    url: string, 
+    targetPath: string, 
+    onProgress?: (progress: { percent: number; speed: number; downloaded: number; total: number }) => void
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const file = createWriteStream(targetPath);
+      let resolved = false;
+      let downloadedBytes = 0;
+      let totalBytes = 0;
+      let lastReportTime = Date.now();
+      let lastReportBytes = 0;
+
+      const finish = (err?: Error) => {
+        if (!resolved) {
+          resolved = true;
+          file.close();
+          if (err) {
+            fs.unlink(targetPath).catch(() => {});
+            reject(err);
+          } else {
+            resolve();
+          }
+        }
+      };
+
+      const request = https.get(url, { timeout: 300000 }, (response) => {
+        if (response.statusCode === 301 || response.statusCode === 302) {
+          if (response.headers.location) {
+            file.close();
+            fs.unlink(targetPath).catch(() => {});
+            this.downloadFile(response.headers.location, targetPath, onProgress)
+              .then(resolve)
+              .catch(reject);
+            return;
+          }
+        }
+
+        if (response.statusCode !== 200) {
+          finish(new Error(`HTTP ${response.statusCode}`));
+          return;
+        }
+
+        totalBytes = parseInt(response.headers['content-length'] || '0', 10);
+
+        response.on('data', (chunk: Buffer) => {
+          downloadedBytes += chunk.length;
+
+          const now = Date.now();
+          const timeDiff = now - lastReportTime;
+
+          if (timeDiff > 500 && onProgress && totalBytes > 0) {
+            const bytesDiff = downloadedBytes - lastReportBytes;
+            const speed = (bytesDiff / timeDiff) * 1000;
+
+            onProgress({
+              percent: Math.round((downloadedBytes / totalBytes) * 100),
+              speed,
+              downloaded: downloadedBytes,
+              total: totalBytes
+            });
+
+            lastReportTime = now;
+            lastReportBytes = downloadedBytes;
+          }
+        });
+
+        response.pipe(file);
+
+        file.on('finish', () => {
+          if (onProgress && totalBytes > 0) {
+            onProgress({
+              percent: 100,
+              speed: 0,
+              downloaded: downloadedBytes,
+              total: totalBytes
+            });
+          }
+          finish();
+        });
+
+        file.on('error', (err) => finish(err));
+      });
+
+      request.on('error', (err) => finish(err));
+      request.on('timeout', () => {
+        request.destroy();
+        finish(new Error('Timeout de descarga (5 minutos)'));
+      });
+    });
+  }
+
+  private async extractExeFromZip(zipPath: string, targetPath: string, binaryId: string): Promise<void> {
+    try {
+      const zip = new AdmZip(zipPath);
+      const entries = zip.getEntries();
+
+      const exeEntry = entries.find(entry => {
+        const name = entry.entryName.toLowerCase();
+        return name.endsWith(`${binaryId}.exe`) || name.endsWith(`${binaryId}.exe`.replace('-', ''));
+      }) || entries.find(entry => entry.entryName.toLowerCase().endsWith('.exe'));
+
+      if (!exeEntry) {
+        throw new Error(`No se encontró .exe para ${binaryId} en el ZIP`);
+      }
+
+      zip.extractEntryTo(exeEntry, path.dirname(targetPath), false, true);
+
+      const extractedPath = path.join(path.dirname(targetPath), exeEntry.entryName.split('/').pop() || '');
+      if (extractedPath !== targetPath) {
+        await fs.rename(extractedPath, targetPath).catch(() => {});
+      }
+
+      this.logger.success('Binarios', `${binaryId} extraído correctamente`);
+    } catch (error) {
+      this.logger.error('Binarios', `Error extrayendo ${binaryId}: ${(error as Error).message}`);
+      throw error;
     }
   }
 
@@ -256,8 +454,7 @@ export class BinaryManager {
     if (!binary) return false;
 
     this.logger.info('Binarios', `Reparando ${binaryId}...`);
-    
-    // Eliminar archivo corrupto si existe
+
     if (binary.path) {
       try {
         await fs.unlink(binary.path);
@@ -266,7 +463,12 @@ export class BinaryManager {
       }
     }
 
-    // Re-descargar
+    binary.path = '';
+    binary.version = '';
+    binary.size = 0;
+    binary.status = 'missing';
+    binary.error = undefined;
+
     return this.downloadBinary(binaryId);
   }
 
@@ -284,6 +486,10 @@ export class BinaryManager {
 
   getBinaryStatus(binaryId: string): BinaryInfo | undefined {
     return this.binaries.get(binaryId);
+  }
+
+  isDownloading(binaryId: string): boolean {
+    return this.downloadingIds.has(binaryId);
   }
 
   async installBinary(binaryId: string, data: Uint8Array): Promise<{ success: boolean; version: string }> {
@@ -312,7 +518,9 @@ export class BinaryManager {
 
       this.logger.success('Binarios', `${binaryId} instalado correctamente`);
 
-      return { success: true, version: '' };
+      await this.verifyBinary(binaryId);
+
+      return { success: true, version: binary.version };
     } catch (error) {
       this.logger.error('Binarios', `Error instalando ${binaryId}: ${error instanceof Error ? error.message : 'Error desconocido'}`);
       return { success: false, version: '' };
@@ -321,6 +529,8 @@ export class BinaryManager {
 
   async deleteAllBinaries(): Promise<boolean> {
     try {
+      this.downloadingIds.clear();
+
       for (const [id, binary] of this.binaries) {
         if (binary.path && binary.path.length > 0) {
           try {
@@ -330,8 +540,7 @@ export class BinaryManager {
             this.logger.warning('Binarios', `No se pudo eliminar ${id}: ${err instanceof Error ? err.message : 'Error desconocido'}`);
           }
         }
-        
-        // Resetear estado
+
         binary.path = '';
         binary.version = '';
         binary.size = 0;
@@ -339,7 +548,7 @@ export class BinaryManager {
         binary.error = undefined;
         binary.lastChecked = new Date().toISOString();
       }
-      
+
       this.logger.success('Binarios', 'Todos los binarios eliminados');
       return true;
     } catch (error) {
