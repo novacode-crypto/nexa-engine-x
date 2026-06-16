@@ -141,8 +141,8 @@ export default function Dashboard() {
                 {readyBinaries}/{totalBinaries}
               </p>
             </div>
-            <div className="w-10 h-10 rounded-xl bg-[#a855f7]/10 flex items-center justify-center">
-              <HardDrive className="w-5 h-5 text-[#a855f7]" />
+            <div className="w-10 h-10 rounded-xl bg-[#fbbf24]/10 flex items-center justify-center">
+              <HardDrive className="w-5 h-5 text-[#fbbf24]" />
             </div>
           </div>
           <div className="mt-3 w-full bg-white/5 rounded-full h-1 overflow-hidden">
@@ -163,8 +163,8 @@ export default function Dashboard() {
                 {activePlugins}
               </p>
             </div>
-            <div className="w-10 h-10 rounded-xl bg-[#06b6d4]/10 flex items-center justify-center">
-              <Puzzle className="w-5 h-5 text-[#06b6d4]" />
+            <div className="w-10 h-10 rounded-xl bg-[#f97316]/10 flex items-center justify-center">
+              <Puzzle className="w-5 h-5 text-[#f97316]" />
             </div>
           </div>
           <p className="nexa-mono text-[9px] text-[#64748b] mt-3">

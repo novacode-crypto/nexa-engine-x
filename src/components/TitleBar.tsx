@@ -28,14 +28,14 @@ export default function TitleBar() {
         <div className="w-5 h-5 rounded-[6px] bg-gradient-to-br from-[#a855f7] to-[#7c3aed] flex items-center justify-center shadow-[0_0_8px_rgba(168,85,247,0.4)]">
           <Hexagon className="w-3 h-3 text-white" strokeWidth={2.5} />
         </div>
-        <div className="flex flex-col leading-none">
-          <span className="text-[11px] font-semibold text-white tracking-tight" style={{ fontFamily: 'Syne, sans-serif', fontWeight: 700 }}>
-            NEXA
-          </span>
-          <span className="text-[8px] text-[#64748b] font-mono tracking-widest uppercase">
-            Engine X
-          </span>
-        </div>
+        <span
+          className="text-[13px] tracking-tight"
+          style={{ fontFamily: 'Syne, sans-serif', fontWeight: 700 }}
+        >
+          <span className="text-[#a855f7]">Nexa</span>
+          <span className="text-white"> Engine</span>
+          <span className="text-[#a855f7]">X</span>
+        </span>
       </div>
 
       {/* Centro vacío */}

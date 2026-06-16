@@ -8,6 +8,8 @@ export interface ElectronAPI {
   downloadBinary: (binaryId: string) => Promise<unknown>;
   verifyBinary: (binaryId: string) => Promise<unknown>;
   repairBinary: (binaryId: string) => Promise<unknown>;
+  installBinary: (binaryId: string, data: Uint8Array) => Promise<boolean>;
+  deleteAllBinaries: () => Promise<boolean>;
   
   // Plugins
   installPlugin: (pluginPath: string) => Promise<unknown>;
@@ -43,6 +45,8 @@ const api: ElectronAPI = {
   downloadBinary: (binaryId: string) => ipcRenderer.invoke('download-binary', binaryId),
   verifyBinary: (binaryId: string) => ipcRenderer.invoke('verify-binary', binaryId),
   repairBinary: (binaryId: string) => ipcRenderer.invoke('repair-binary', binaryId),
+  installBinary: (binaryId: string, data: Uint8Array) => ipcRenderer.invoke('install-binary', binaryId, data),
+  deleteAllBinaries: () => ipcRenderer.invoke('delete-all-binaries'),
   installPlugin: (pluginPath: string) => ipcRenderer.invoke('install-plugin', pluginPath),
   getPlugins: () => ipcRenderer.invoke('get-plugins'),
   getSettings: () => ipcRenderer.invoke('get-settings'),

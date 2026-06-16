@@ -84,8 +84,8 @@
     font-size: 13px;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
-    overflow: hidden;
-    border-radius: 12px;
+    /* overflow: hidden; */
+    /* border-radius: 12px; */
     position: relative;
     background-image: radial-gradient(
         ellipse 200% 120% at 80% -10%,
@@ -353,7 +353,7 @@
     box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.08),
       0 8px 24px rgba(168, 85, 247, 0.1);
     position: relative;
-    overflow: hidden;
+    /* overflow: hidden; */
   }
   .time-card::before {
     content: "";
@@ -401,7 +401,7 @@
     color: #fff;
     font-weight: 500;
     white-space: nowrap;
-    overflow: hidden;
+    /* overflow: hidden; */
     text-overflow: ellipsis;
   }
   .info-value.mono {
@@ -533,7 +533,7 @@
     height: 2px;
     background: rgba(168, 85, 247, 0.15);
     border-radius: 99px;
-    overflow: hidden;
+    /* overflow: hidden; */
     margin-top: 2px;
   }
   .progress-bar-fill {

@@ -71,18 +71,15 @@ class NexaEngineX {
     this.mainWindow = new BrowserWindow({
       width: 1280,
       height: 800,
-      minWidth: 1280,
-      minHeight: 800,
-      maxWidth: 1280,
-      maxHeight: 800,
-      resizable: false,
+              resizable: true,
       frame: false,
       titleBarStyle: "hidden",
-      transparent: true,
+      // transparent: true,
       backgroundColor: "#00000000",
       show: false,
       roundedCorners: true,
       thickFrame: true,
+    // backgroundMaterial: 'acrylic',
       hasShadow: true,
       vibrancy: "under-window",
       webPreferences: {
@@ -98,12 +95,12 @@ class NexaEngineX {
 
     if (devServerUrl) {
       await this.mainWindow.loadURL(devServerUrl);
-      this.mainWindow.webContents.openDevTools();
+      // this.mainWindow.webContents.openDevTools();
     } else {
       // En desarrollo, intentar localhost:5173 primero
       try {
         await this.mainWindow.loadURL("http://localhost:5173/");
-        this.mainWindow.webContents.openDevTools();
+        // this.mainWindow.webContents.openDevTools();
       } catch {
         const indexPath = path.join(__dirname, "../renderer/index.html");
         await this.mainWindow.loadFile(indexPath);
@@ -217,6 +214,14 @@ class NexaEngineX {
 
     ipcMain.handle("repair-binary", async (_, binaryId: string) => {
       return this.binaryManager.repairBinary(binaryId);
+    });
+
+    ipcMain.handle("install-binary", async (_, binaryId: string, data: Uint8Array) => {
+      return this.binaryManager.installBinary(binaryId, data);
+    });
+
+    ipcMain.handle("delete-all-binaries", async () => {
+      return this.binaryManager.deleteAllBinaries();
     });
 
     // Plugins

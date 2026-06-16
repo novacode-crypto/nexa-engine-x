@@ -352,19 +352,41 @@ class BinaryManager {
   }
   async verifyBinary(binaryId) {
     const binary = this.binaries.get(binaryId);
-    if (!binary || !binary.path) return false;
-    try {
+    if (!binary) return false;
+    if (!binary.path) {
+      const binaryNames = {
+        "yt-dlp": "yt-dlp.exe",
+        "ffmpeg": "ffmpeg.exe",
+        "aria2c": "aria2c.exe"
+      };
+      const fileName = binaryNames[binaryId] || binaryId;
+      const expectedPath = path.join(this.binariesPath, fileName);
+      try {
+        await fs.access(expectedPath);
+        binary.path = expectedPath;
+        binary.status = "verifying";
+      } catch {
+        binary.status = "missing";
+        binary.error = "Binario no encontrado";
+        return false;
+      }
+    } else {
       binary.status = "verifying";
-      await fs.access(binary.path, fs.constants.X_OK);
-      const isValid = await this.runDryRun(binaryId, binary.path);
-      if (isValid) {
+    }
+    try {
+      await fs.access(binary.path);
+      const version = await this.getBinaryVersion(binaryId, binary.path);
+      if (version) {
+        binary.version = version;
         binary.status = "ready";
+        binary.size = (await fs.stat(binary.path)).size;
         binary.lastChecked = (/* @__PURE__ */ new Date()).toISOString();
-        this.logger.success("Binarios", `${binaryId} verificado correctamente`);
+        binary.error = void 0;
+        this.logger.success("Binarios", `${binaryId} verificado correctamente (v${version})`);
         return true;
       } else {
         binary.status = "corrupt";
-        binary.error = "Verificación de ejecución fallida";
+        binary.error = "No se pudo obtener la versión";
         this.logger.warning("Binarios", `${binaryId} parece estar corrupto`);
         return false;
       }
@@ -375,7 +397,7 @@ class BinaryManager {
       return false;
     }
   }
-  async runDryRun(binaryId, binaryPath) {
+  async getBinaryVersion(binaryId, binaryPath) {
     return new Promise((resolve) => {
       let args = [];
       switch (binaryId) {
@@ -389,13 +411,13 @@ class BinaryManager {
           args = ["-version"];
           break;
         default:
-          resolve(false);
+          resolve("");
           return;
       }
       const child = child_process.spawn(binaryPath, args, {
         windowsHide: true,
         shell: false,
-        timeout: 3e4
+        timeout: 1e4
       });
       let output = "";
       child.stdout.on("data", (data) => {
@@ -404,12 +426,16 @@ class BinaryManager {
       child.stderr.on("data", (data) => {
         output += data.toString();
       });
-      child.on("close", (code) => {
-        resolve(code === 0 && output.length > 0);
+      child.on("close", () => {
+        const lines = output.trim().split("\n");
+        let version = lines[0]?.trim() || "";
+        if (binaryId === "ffmpeg" && version.includes("version")) {
+          const match = version.match(/version\s+([\d.]+)/);
+          version = match ? match[1] : version;
+        }
+        resolve(version);
       });
-      child.on("error", () => {
-        resolve(false);
-      });
+      child.on("error", () => resolve(""));
     });
   }
   async downloadBinary(binaryId) {
@@ -462,133 +488,56 @@ class BinaryManager {
   getBinaryStatus(binaryId) {
     return this.binaries.get(binaryId);
   }
-}
-class HealthMonitor {
-  // 5 minutos
-  constructor(binaryManager, logger) {
-    this.binaryManager = binaryManager;
-    this.logger = logger;
-  }
-  intervalId = null;
-  checkInterval = 5 * 60 * 1e3;
-  startMonitoring() {
-    this.logger.info("HealthMonitor", "Iniciando monitoreo de salud...");
-    this.runHealthCheck();
-    this.intervalId = setInterval(() => {
-      this.runHealthCheck();
-    }, this.checkInterval);
-  }
-  stop() {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
-  }
-  restart() {
-    this.stop();
-    this.startMonitoring();
-  }
-  async runHealthCheck() {
-    this.logger.debug("HealthMonitor", "Ejecutando verificación de salud...");
-    const binaries = this.binaryManager.getAllStatus();
-    let issuesFound = false;
-    for (const binary of binaries) {
-      if (binary.status === "corrupt" || binary.status === "error") {
-        issuesFound = true;
-        this.logger.warning("HealthMonitor", `Binario ${binary.id} requiere reparación`);
-        if (binary.status === "corrupt") {
-          this.logger.info("HealthMonitor", `Auto-reparando ${binary.id}...`);
-          await this.binaryManager.repairBinary(binary.id);
-        }
-      }
-    }
-    if (!issuesFound) {
-      this.logger.debug("HealthMonitor", "Todos los sistemas operativos");
-    }
-  }
-}
-class PluginSystem {
-  constructor(logger) {
-    this.logger = logger;
-    this.pluginsDir = path.join(electron.app.getPath("userData"), "plugins");
-  }
-  plugins = /* @__PURE__ */ new Map();
-  pluginsDir;
-  async loadPlugins() {
+  async installBinary(binaryId, data) {
     try {
-      await fs.mkdir(this.pluginsDir, { recursive: true });
-      const entries = await fs.readdir(this.pluginsDir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isDirectory()) {
-          await this.loadPlugin(path.join(this.pluginsDir, entry.name));
-        }
+      const binary = this.binaries.get(binaryId);
+      if (!binary) {
+        return { success: false, version: "" };
       }
-      this.logger.info("Plugins", `${this.plugins.size} plugins cargados`);
-    } catch (error) {
-      this.logger.error("Plugins", `Error cargando plugins: ${error}`);
-    }
-  }
-  async loadPlugin(pluginPath) {
-    try {
-      const metadataPath = path.join(pluginPath, "metadata.json");
-      const metadataContent = await fs.readFile(metadataPath, "utf-8");
-      const metadata = JSON.parse(metadataContent);
-      const plugin = {
-        metadata,
-        path: pluginPath,
-        enabled: true,
-        loaded: true
+      const binaryNames = {
+        "yt-dlp": "yt-dlp.exe",
+        "ffmpeg": "ffmpeg.exe",
+        "aria2c": "aria2c.exe"
       };
-      this.plugins.set(metadata.id, plugin);
-      this.logger.info("Plugins", `Plugin cargado: ${metadata.name} v${metadata.version}`);
+      const fileName = binaryNames[binaryId] || binaryId;
+      const destPath = path.join(this.binariesPath, fileName);
+      await fs.writeFile(destPath, Buffer.from(data));
+      binary.path = destPath;
+      binary.status = "ready";
+      binary.size = (await fs.stat(destPath)).size;
+      binary.lastChecked = (/* @__PURE__ */ new Date()).toISOString();
+      binary.error = void 0;
+      this.logger.success("Binarios", `${binaryId} instalado correctamente`);
+      return { success: true, version: "" };
     } catch (error) {
-      this.logger.error("Plugins", `Error cargando plugin en ${pluginPath}: ${error}`);
+      this.logger.error("Binarios", `Error instalando ${binaryId}: ${error instanceof Error ? error.message : "Error desconocido"}`);
+      return { success: false, version: "" };
     }
   }
-  async installPlugin(pluginPath) {
+  async deleteAllBinaries() {
     try {
-      const metadataPath = path.join(pluginPath, "metadata.json");
-      await fs.access(metadataPath);
-      const metadataContent = await fs.readFile(metadataPath, "utf-8");
-      const metadata = JSON.parse(metadataContent);
-      const targetPath = path.join(this.pluginsDir, metadata.id);
-      await fs.mkdir(targetPath, { recursive: true });
-      const files = await fs.readdir(pluginPath);
-      for (const file of files) {
-        const src = path.join(pluginPath, file);
-        const dest = path.join(targetPath, file);
-        await fs.copyFile(src, dest);
+      for (const [id, binary] of this.binaries) {
+        if (binary.path && binary.path.length > 0) {
+          try {
+            await fs.unlink(binary.path);
+            this.logger.info("Binarios", `${id} eliminado`);
+          } catch (err) {
+            this.logger.warning("Binarios", `No se pudo eliminar ${id}: ${err instanceof Error ? err.message : "Error desconocido"}`);
+          }
+        }
+        binary.path = "";
+        binary.version = "";
+        binary.size = 0;
+        binary.status = "missing";
+        binary.error = void 0;
+        binary.lastChecked = (/* @__PURE__ */ new Date()).toISOString();
       }
-      await this.loadPlugin(targetPath);
-      return { success: true, message: `Plugin ${metadata.name} instalado correctamente` };
+      this.logger.success("Binarios", "Todos los binarios eliminados");
+      return true;
     } catch (error) {
-      return {
-        success: false,
-        message: `Error instalando plugin: ${error instanceof Error ? error.message : "Unknown"}`
-      };
+      this.logger.error("Binarios", `Error eliminando binarios: ${error instanceof Error ? error.message : "Error desconocido"}`);
+      return false;
     }
-  }
-  getPluginList() {
-    return Array.from(this.plugins.values());
-  }
-  getPlugin(id) {
-    return this.plugins.get(id);
-  }
-  enablePlugin(id) {
-    const plugin = this.plugins.get(id);
-    if (plugin) {
-      plugin.enabled = true;
-      return true;
-    }
-    return false;
-  }
-  disablePlugin(id) {
-    const plugin = this.plugins.get(id);
-    if (plugin) {
-      plugin.enabled = false;
-      return true;
-    }
-    return false;
   }
 }
 class DiagnosticsService {
@@ -708,6 +657,50 @@ class DiagnosticsService {
     return this.lastResults;
   }
 }
+class HealthMonitor {
+  // 5 minutos
+  constructor(binaryManager, logger) {
+    this.binaryManager = binaryManager;
+    this.logger = logger;
+  }
+  intervalId = null;
+  checkInterval = 5 * 60 * 1e3;
+  startMonitoring() {
+    this.logger.info("HealthMonitor", "Iniciando monitoreo de salud...");
+    this.runHealthCheck();
+    this.intervalId = setInterval(() => {
+      this.runHealthCheck();
+    }, this.checkInterval);
+  }
+  stop() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+  }
+  restart() {
+    this.stop();
+    this.startMonitoring();
+  }
+  async runHealthCheck() {
+    this.logger.debug("HealthMonitor", "Ejecutando verificación de salud...");
+    const binaries = this.binaryManager.getAllStatus();
+    let issuesFound = false;
+    for (const binary of binaries) {
+      if (binary.status === "corrupt" || binary.status === "error") {
+        issuesFound = true;
+        this.logger.warning("HealthMonitor", `Binario ${binary.id} requiere reparación`);
+        if (binary.status === "corrupt") {
+          this.logger.info("HealthMonitor", `Auto-reparando ${binary.id}...`);
+          await this.binaryManager.repairBinary(binary.id);
+        }
+      }
+    }
+    if (!issuesFound) {
+      this.logger.debug("HealthMonitor", "Todos los sistemas operativos");
+    }
+  }
+}
 class Logger {
   logs = [];
   maxLogs = 5e3;
@@ -793,6 +786,90 @@ class Logger {
   }
   clear() {
     this.logs = [];
+  }
+}
+class PluginSystem {
+  constructor(logger) {
+    this.logger = logger;
+    this.pluginsDir = path.join(electron.app.getPath("userData"), "plugins");
+  }
+  plugins = /* @__PURE__ */ new Map();
+  pluginsDir;
+  async loadPlugins() {
+    try {
+      await fs.mkdir(this.pluginsDir, { recursive: true });
+      const entries = await fs.readdir(this.pluginsDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          await this.loadPlugin(path.join(this.pluginsDir, entry.name));
+        }
+      }
+      this.logger.info("Plugins", `${this.plugins.size} plugins cargados`);
+    } catch (error) {
+      this.logger.error("Plugins", `Error cargando plugins: ${error}`);
+    }
+  }
+  async loadPlugin(pluginPath) {
+    try {
+      const metadataPath = path.join(pluginPath, "metadata.json");
+      const metadataContent = await fs.readFile(metadataPath, "utf-8");
+      const metadata = JSON.parse(metadataContent);
+      const plugin = {
+        metadata,
+        path: pluginPath,
+        enabled: true,
+        loaded: true
+      };
+      this.plugins.set(metadata.id, plugin);
+      this.logger.info("Plugins", `Plugin cargado: ${metadata.name} v${metadata.version}`);
+    } catch (error) {
+      this.logger.error("Plugins", `Error cargando plugin en ${pluginPath}: ${error}`);
+    }
+  }
+  async installPlugin(pluginPath) {
+    try {
+      const metadataPath = path.join(pluginPath, "metadata.json");
+      await fs.access(metadataPath);
+      const metadataContent = await fs.readFile(metadataPath, "utf-8");
+      const metadata = JSON.parse(metadataContent);
+      const targetPath = path.join(this.pluginsDir, metadata.id);
+      await fs.mkdir(targetPath, { recursive: true });
+      const files = await fs.readdir(pluginPath);
+      for (const file of files) {
+        const src = path.join(pluginPath, file);
+        const dest = path.join(targetPath, file);
+        await fs.copyFile(src, dest);
+      }
+      await this.loadPlugin(targetPath);
+      return { success: true, message: `Plugin ${metadata.name} instalado correctamente` };
+    } catch (error) {
+      return {
+        success: false,
+        message: `Error instalando plugin: ${error instanceof Error ? error.message : "Unknown"}`
+      };
+    }
+  }
+  getPluginList() {
+    return Array.from(this.plugins.values());
+  }
+  getPlugin(id) {
+    return this.plugins.get(id);
+  }
+  enablePlugin(id) {
+    const plugin = this.plugins.get(id);
+    if (plugin) {
+      plugin.enabled = true;
+      return true;
+    }
+    return false;
+  }
+  disablePlugin(id) {
+    const plugin = this.plugins.get(id);
+    if (plugin) {
+      plugin.enabled = false;
+      return true;
+    }
+    return false;
   }
 }
 class StoreManager {
@@ -883,36 +960,31 @@ class NexaEngineX {
     this.mainWindow = new electron.BrowserWindow({
       width: 1280,
       height: 800,
-      minWidth: 1280,
-      minHeight: 800,
-      maxWidth: 1280,
-      maxHeight: 800,
-      resizable: false,
+      resizable: true,
       frame: false,
       titleBarStyle: "hidden",
-      transparent: false,
-      backgroundColor: "#07071a",
+      // transparent: true,
+      backgroundColor: "#00000000",
       show: false,
       roundedCorners: true,
-      thickFrame: false,
+      thickFrame: true,
+      // backgroundMaterial: 'acrylic',
       hasShadow: true,
       vibrancy: "under-window",
       webPreferences: {
         preload: path.join(__dirname$1, "../preload/index.js"),
         contextIsolation: true,
         nodeIntegration: false,
-        sandbox: true,
+        sandbox: false,
         webSecurity: true
       }
     });
     const devServerUrl = process.env.VITE_DEV_SERVER_URL;
     if (devServerUrl) {
       await this.mainWindow.loadURL(devServerUrl);
-      this.mainWindow.webContents.openDevTools();
     } else {
       try {
         await this.mainWindow.loadURL("http://localhost:5173/");
-        this.mainWindow.webContents.openDevTools();
       } catch {
         const indexPath = path.join(__dirname$1, "../renderer/index.html");
         await this.mainWindow.loadFile(indexPath);
@@ -992,6 +1064,12 @@ class NexaEngineX {
     electron.ipcMain.handle("repair-binary", async (_, binaryId) => {
       return this.binaryManager.repairBinary(binaryId);
     });
+    electron.ipcMain.handle("install-binary", async (_, binaryId, data) => {
+      return this.binaryManager.installBinary(binaryId, data);
+    });
+    electron.ipcMain.handle("delete-all-binaries", async () => {
+      return this.binaryManager.deleteAllBinaries();
+    });
     electron.ipcMain.handle("install-plugin", async (_, pluginPath) => {
       return this.pluginSystem.installPlugin(pluginPath);
     });
@@ -1034,19 +1112,25 @@ class NexaEngineX {
       return this.apiServer.regenerateToken();
     });
     electron.ipcMain.handle("open-downloads-folder", async () => {
-      const downloadsPath = this.store.get("downloadsPath", path.join(electron.app.getPath("downloads"), "YTDownloadX"));
+      const downloadsPath = this.store.get(
+        "downloadsPath",
+        path.join(electron.app.getPath("downloads"), "YTDownloadX")
+      );
       await electron.shell.openPath(downloadsPath);
     });
-    electron.ipcMain.handle("show-notification", async (_, title, body) => {
-      const { Notification } = await import("electron");
-      if (Notification.isSupported()) {
-        new Notification({
-          title,
-          body,
-          icon: path.join(__dirname$1, "../../resources/icon.png")
-        }).show();
+    electron.ipcMain.handle(
+      "show-notification",
+      async (_, title, body) => {
+        const { Notification } = await import("electron");
+        if (Notification.isSupported()) {
+          new Notification({
+            title,
+            body,
+            icon: path.join(__dirname$1, "../../resources/icon.png")
+          }).show();
+        }
       }
-    });
+    );
     electron.ipcMain.handle("window-minimize", () => {
       this.mainWindow?.minimize();
     });

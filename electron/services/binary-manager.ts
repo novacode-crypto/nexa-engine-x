@@ -1,7 +1,5 @@
-import { app } from 'electron';
 import path from 'path';
 import fs from 'fs/promises';
-import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { Logger } from './logger';
 import { StoreManager } from './store-manager';
@@ -118,25 +116,49 @@ export class BinaryManager {
 
   async verifyBinary(binaryId: string): Promise<boolean> {
     const binary = this.binaries.get(binaryId);
-    if (!binary || !binary.path) return false;
+    if (!binary) return false;
+
+    // Si no hay path, verificar si existe en la carpeta de binarios
+    if (!binary.path) {
+      const binaryNames: Record<string, string> = {
+        'yt-dlp': 'yt-dlp.exe',
+        'ffmpeg': 'ffmpeg.exe',
+        'aria2c': 'aria2c.exe'
+      };
+      const fileName = binaryNames[binaryId] || binaryId;
+      const expectedPath = path.join(this.binariesPath, fileName);
+      
+      try {
+        await fs.access(expectedPath);
+        binary.path = expectedPath;
+        binary.status = 'verifying';
+      } catch {
+        binary.status = 'missing';
+        binary.error = 'Binario no encontrado';
+        return false;
+      }
+    } else {
+      binary.status = 'verifying';
+    }
 
     try {
-      binary.status = 'verifying';
-      
-      // Verificar que el archivo existe y es ejecutable
-      await fs.access(binary.path, fs.constants.X_OK);
-      
-      // Ejecutar dry-run para verificar funcionamiento
-      const isValid = await this.runDryRun(binaryId, binary.path);
-      
-      if (isValid) {
+      // Verificar que el archivo existe
+      await fs.access(binary.path);
+
+      // Obtener versión
+      const version = await this.getBinaryVersion(binaryId, binary.path);
+
+      if (version) {
+        binary.version = version;
         binary.status = 'ready';
+        binary.size = (await fs.stat(binary.path)).size;
         binary.lastChecked = new Date().toISOString();
-        this.logger.success('Binarios', `${binaryId} verificado correctamente`);
+        binary.error = undefined;
+        this.logger.success('Binarios', `${binaryId} verificado correctamente (v${version})`);
         return true;
       } else {
         binary.status = 'corrupt';
-        binary.error = 'Verificación de ejecución fallida';
+        binary.error = 'No se pudo obtener la versión';
         this.logger.warning('Binarios', `${binaryId} parece estar corrupto`);
         return false;
       }
@@ -148,7 +170,7 @@ export class BinaryManager {
     }
   }
 
-  private async runDryRun(binaryId: string, binaryPath: string): Promise<boolean> {
+  private async getBinaryVersion(binaryId: string, binaryPath: string): Promise<string> {
     return new Promise((resolve) => {
       let args: string[] = [];
       
@@ -163,27 +185,31 @@ export class BinaryManager {
           args = ['-version'];
           break;
         default:
-          resolve(false);
+          resolve('');
           return;
       }
 
       const child = spawn(binaryPath, args, {
         windowsHide: true,
         shell: false,
-        timeout: 30000
+        timeout: 10000
       });
 
       let output = '';
-      child.stdout.on('data', (data) => { output += data.toString(); });
-      child.stderr.on('data', (data) => { output += data.toString(); });
+      child.stdout.on('data', (data: Buffer) => { output += data.toString(); });
+      child.stderr.on('data', (data: Buffer) => { output += data.toString(); });
 
-      child.on('close', (code) => {
-        resolve(code === 0 && output.length > 0);
+      child.on('close', () => {
+        const lines = output.trim().split('\n');
+        let version = lines[0]?.trim() || '';
+        if (binaryId === 'ffmpeg' && version.includes('version')) {
+          const match = version.match(/version\s+([\d.]+)/);
+          version = match ? match[1] : version;
+        }
+        resolve(version);
       });
 
-      child.on('error', () => {
-        resolve(false);
-      });
+      child.on('error', () => resolve(''));
     });
   }
 
@@ -258,5 +284,67 @@ export class BinaryManager {
 
   getBinaryStatus(binaryId: string): BinaryInfo | undefined {
     return this.binaries.get(binaryId);
+  }
+
+  async installBinary(binaryId: string, data: Uint8Array): Promise<{ success: boolean; version: string }> {
+    try {
+      const binary = this.binaries.get(binaryId);
+      if (!binary) {
+        return { success: false, version: '' };
+      }
+
+      const binaryNames: Record<string, string> = {
+        'yt-dlp': 'yt-dlp.exe',
+        'ffmpeg': 'ffmpeg.exe',
+        'aria2c': 'aria2c.exe'
+      };
+
+      const fileName = binaryNames[binaryId] || binaryId;
+      const destPath = path.join(this.binariesPath, fileName);
+
+      await fs.writeFile(destPath, Buffer.from(data));
+
+      binary.path = destPath;
+      binary.status = 'ready';
+      binary.size = (await fs.stat(destPath)).size;
+      binary.lastChecked = new Date().toISOString();
+      binary.error = undefined;
+
+      this.logger.success('Binarios', `${binaryId} instalado correctamente`);
+
+      return { success: true, version: '' };
+    } catch (error) {
+      this.logger.error('Binarios', `Error instalando ${binaryId}: ${error instanceof Error ? error.message : 'Error desconocido'}`);
+      return { success: false, version: '' };
+    }
+  }
+
+  async deleteAllBinaries(): Promise<boolean> {
+    try {
+      for (const [id, binary] of this.binaries) {
+        if (binary.path && binary.path.length > 0) {
+          try {
+            await fs.unlink(binary.path);
+            this.logger.info('Binarios', `${id} eliminado`);
+          } catch (err) {
+            this.logger.warning('Binarios', `No se pudo eliminar ${id}: ${err instanceof Error ? err.message : 'Error desconocido'}`);
+          }
+        }
+        
+        // Resetear estado
+        binary.path = '';
+        binary.version = '';
+        binary.size = 0;
+        binary.status = 'missing';
+        binary.error = undefined;
+        binary.lastChecked = new Date().toISOString();
+      }
+      
+      this.logger.success('Binarios', 'Todos los binarios eliminados');
+      return true;
+    } catch (error) {
+      this.logger.error('Binarios', `Error eliminando binarios: ${error instanceof Error ? error.message : 'Error desconocido'}`);
+      return false;
+    }
   }
 }
